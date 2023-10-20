@@ -51,6 +51,7 @@ fn parse_request(stream: &mut TcpStream) -> Result<HttpRequest, Error> {
             let mut method: Option<HttpMethod> = Option::None;
             let mut path: &str = "";
             let mut http_version: &str = "";
+            let mut headers: Vec<String> = Vec::new();
 
             let mut encountered_newlines = 0;
             for (line_num, line) in data.lines().enumerate() {
@@ -60,12 +61,12 @@ fn parse_request(stream: &mut TcpStream) -> Result<HttpRequest, Error> {
                     method = Some(parse_method(method_str)?);
                     path = parts[1];
                     http_version = parts[2];
-                }
-
-                if line.is_empty() {
+                } else if line.is_empty() {
                     encountered_newlines += 1;
                 } else if encountered_newlines == 2 {
                     // TODO: fill body
+                } else {
+                    headers.push(line.to_string());
                 }
             }
 
@@ -76,7 +77,7 @@ fn parse_request(stream: &mut TcpStream) -> Result<HttpRequest, Error> {
                 scheme: "http".to_string(),
                 path: path.to_string(),
                 http_version: http_version.to_string(),
-                headers: Vec::new(),
+                headers,
                 content: Vec::new()
             })
         },
@@ -100,6 +101,27 @@ fn handle_echo(request: HttpRequest, stream: &mut TcpStream) -> usize {
     ).unwrap();
 }
 
+fn handle_user_agent(request: HttpRequest, stream: &mut TcpStream) -> usize {
+    println!("handle_user_agent");
+    for header in &request.headers {
+        println!("Header: {}", header);
+    }
+    let user_agent = &request.headers
+                             .into_iter()
+                             .filter(|s| s.starts_with("User-Agent"))
+                             .map(|s| s.replace("User-Agent: ", ""))
+                             .collect::<Vec<_>>()[0];
+
+
+    return stream.write(
+        format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length:{}\r\n\r\n{}",
+            user_agent.len(),
+            user_agent
+        ).as_bytes()
+    ).unwrap();
+}
+
 fn handle_connection(mut stream: TcpStream) -> Result<(), std::io::Error>{
     let ok_response = b"HTTP/1.1 200 OK\r\n\r\n";
     let not_found_response = b"HTTP/1.1 404 NOT FOUND\r\n\r\n";
@@ -111,6 +133,10 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), std::io::Error>{
         "/" => {
             bytes_written = stream.write(ok_response)?;
         },
+
+        "/user-agent" => {
+            bytes_written = handle_user_agent(request, &mut stream);
+        }
 
         _ if request.path.starts_with("/echo/") => {
             bytes_written = handle_echo(request, &mut stream);
