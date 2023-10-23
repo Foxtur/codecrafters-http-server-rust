@@ -1,12 +1,14 @@
 use std::env;
 use std::fs::File;
 use std::io::{self, Read};
+use std::io::prelude::*;
 use io::Error;
 use nom::AsBytes;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[allow(dead_code)]
+#[derive(PartialEq)]
 enum HttpMethod {
     GET,
     POST,
@@ -38,18 +40,20 @@ struct HttpResponse<'a> {
 fn parse_method(method_str: &str) -> Result<HttpMethod, Error> {
     match method_str {
         "GET" => Ok(HttpMethod::GET),
+        "POST" => Ok(HttpMethod::POST),
         _ => Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid HTTP method"))
     }
 }
 
 fn parse_request(data: &[u8]) -> Result<HttpRequest, io::Error> {
     let string_data = std::str::from_utf8(data).unwrap();
-    println!("Received data: {}", string_data);
+    println!("Received data:\n{}", string_data);
 
     let mut method: Option<HttpMethod> = Option::None;
     let mut path: &str = "";
     let mut http_version: &str = "";
     let mut headers: Vec<&str> = Vec::new();
+    let mut content = Vec::new();
 
     let mut encountered_newlines = 0;
     for (line_num, line) in string_data.lines().enumerate() {
@@ -61,8 +65,8 @@ fn parse_request(data: &[u8]) -> Result<HttpRequest, io::Error> {
             http_version = parts[2];
         } else if line.is_empty() {
             encountered_newlines += 1;
-        } else if encountered_newlines == 2 {
-            // TODO: fill body
+        } else if encountered_newlines == 1 {
+            content.extend(line.as_bytes())
         } else {
             headers.push(line);
         }
@@ -76,7 +80,7 @@ fn parse_request(data: &[u8]) -> Result<HttpRequest, io::Error> {
         path,
         http_version: http_version.to_string(),
         headers,
-        content: Vec::new()
+        content
     })
 }
 
@@ -155,7 +159,6 @@ fn read_file(file_path: String) -> io::Result<Vec<u8>> {
 
 fn handle_file(request: HttpRequest, data_dir: String) -> HttpResponse {
     let path = request.path.replace("/files/", "");
-    println!("handle_file: {}", path);
     match read_file(format!("{}/{}", data_dir, path)) {
         Ok(file_content) => {
             println!("{:?}", std::str::from_utf8(&file_content).unwrap());
@@ -171,6 +174,31 @@ fn handle_file(request: HttpRequest, data_dir: String) -> HttpResponse {
         Err(_) => {
             handle_not_found()
         }
+    }
+}
+
+fn handle_file_upload(request: HttpRequest, data_dir: String) -> HttpResponse {
+    let path = request.path.replace("/files/", "");
+    println!("handle_file_upload - path: {}", path);
+
+    let file_path = format!("{}{}", data_dir, path);
+
+    let mut file = match File::create(file_path.clone()) {
+        Ok(file) => file,
+        Err(err) => panic!("Error creating file {:?}", err),
+    };
+
+    match file.write_all(&request.content) {
+        Ok(_) => println!("File created and written to successfully: {}", file_path),
+        Err(e) => println!("Error writing to file: {} - {:?}", file_path, e),
+    }
+
+    HttpResponse {
+        http_version: "HTTP/1.1",
+        status_code: 201,
+        reason: "Created",
+        headers: Vec::new(),
+        content: Vec::new()
     }
 }
 
@@ -212,11 +240,17 @@ fn handle_request(request: HttpRequest, data_dir: Option<String>) -> HttpRespons
         _ if request.path.starts_with("/echo/") => {
             handle_echo(request)
         },
-        _ if request.path.starts_with("/files/") => {
+        _ if request.path.starts_with("/files/") && request.method == HttpMethod::GET => {
             match data_dir {
                Some(dir) => {
                    handle_file(request, dir)
                },
+               _ => handle_internal_server_error()
+            }
+        },
+        _ if request.path.starts_with("/files/") && request.method == HttpMethod::POST => {
+            match data_dir {
+                Some(dir) => handle_file_upload(request, dir),
                _ => handle_internal_server_error()
             }
         },
@@ -248,12 +282,16 @@ async fn handle_client(mut socket: TcpStream, data_dir: Option<String>) {
                                 return;
                             }
                         }
-                        Err(_) => return
+                        Err(e) => {
+                            println!("ERROR: handle_client: {:?}", e);
+                            return
+                        }
                     }
                     // close connection
                     return
                 },
-                Err(_) => {
+                Err(e) => {
+                    println!("ERROR: handle_client: {:?}", e);
                     return;
                 }
             }
