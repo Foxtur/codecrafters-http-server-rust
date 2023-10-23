@@ -1,4 +1,6 @@
-use std::io;
+use std::env;
+use std::fs::File;
+use std::io::{self, Read};
 use io::Error;
 use nom::AsBytes;
 use tokio::net::{TcpListener, TcpStream};
@@ -25,7 +27,6 @@ struct HttpRequest<'a> {
     content: Vec<u8>
 }
 
-#[allow(dead_code)]
 struct HttpResponse<'a> {
     http_version: &'a str,
     status_code: u16,
@@ -41,7 +42,6 @@ fn parse_method(method_str: &str) -> Result<HttpMethod, Error> {
     }
 }
 
-#[allow(dead_code)]
 fn parse_request(data: &[u8]) -> Result<HttpRequest, io::Error> {
     let string_data = std::str::from_utf8(data).unwrap();
     println!("Received data: {}", string_data);
@@ -90,6 +90,16 @@ fn handle_ok() -> HttpResponse<'static> {
     }
 }
 
+fn handle_internal_server_error() -> HttpResponse<'static> {
+    HttpResponse {
+        http_version: "HTTP/1.1",
+        status_code: 500,
+        reason: "Internal Server Error",
+        headers: Vec::new(),
+        content: Vec::new()
+    }
+}
+
 fn handle_not_found() -> HttpResponse<'static> {
     HttpResponse {
         http_version: "HTTP/1.1",
@@ -102,8 +112,7 @@ fn handle_not_found() -> HttpResponse<'static> {
 
 fn handle_echo(request: HttpRequest) -> HttpResponse {
     let echo_text = request.path.replace("/echo/", "");
-    let mut headers = Vec::new();
-    headers.push("Content-Type: text/plain");
+    let headers = vec!["Content-Type: text/plain"];
 
     HttpResponse {
         http_version: "HTTP/1.1",
@@ -134,6 +143,34 @@ fn handle_user_agent(request: HttpRequest) -> HttpResponse {
         reason: "OK",
         headers,
         content: user_agent.as_bytes().to_vec(),
+    }
+}
+
+fn read_file(file_path: String) -> io::Result<Vec<u8>> {
+    let mut f = File::open(file_path)?;
+    let mut buffer = Vec::new();
+    f.read_to_end(&mut buffer)?;
+    Ok(buffer)
+}
+
+fn handle_file(request: HttpRequest, data_dir: String) -> HttpResponse {
+    let path = request.path.replace("/files/", "");
+    println!("handle_file: {}", path);
+    match read_file(format!("{}/{}", data_dir, path)) {
+        Ok(file_content) => {
+            println!("{:?}", std::str::from_utf8(&file_content).unwrap());
+            let headers = vec!["Content-Type: application/octet-stream"];
+            HttpResponse {
+                http_version: "HTTP/1.1",
+                status_code: 200,
+                reason: "OK",
+                headers,
+                content: file_content
+            }
+        },
+        Err(_) => {
+            handle_not_found()
+        }
     }
 }
 
@@ -168,20 +205,27 @@ fn http_response_to_string(response: &HttpResponse) -> Vec<u8> {
     http_message
 }
 
-fn handle_request(request: HttpRequest) -> HttpResponse {
-
+fn handle_request(request: HttpRequest, data_dir: Option<String>) -> HttpResponse {
     match request.path {
         "/" => handle_ok(),
         "/user-agent" => handle_user_agent(request),
         _ if request.path.starts_with("/echo/") => {
             handle_echo(request)
         },
+        _ if request.path.starts_with("/files/") => {
+            match data_dir {
+               Some(dir) => {
+                   handle_file(request, dir)
+               },
+               _ => handle_internal_server_error()
+            }
+        },
         _ => handle_not_found(),
     }
 
 }
 
-async fn handle_client(mut socket: TcpStream) {
+async fn handle_client(mut socket: TcpStream, data_dir: Option<String>) {
     loop {
         let mut buffer = [0; 1024];
 
@@ -192,7 +236,7 @@ async fn handle_client(mut socket: TcpStream) {
                     println!("Read {} bytes", n);
                     match parse_request(&buffer[..n]) {
                         Ok(request) => {
-                            let response = handle_request(request);
+                            let response = handle_request(request, data_dir);
                             println!(
                                 "Responding with {} {}",
                                 response.status_code,
@@ -206,7 +250,7 @@ async fn handle_client(mut socket: TcpStream) {
                         }
                         Err(_) => return
                     }
-
+                    // close connection
                     return
                 },
                 Err(_) => {
@@ -219,13 +263,31 @@ async fn handle_client(mut socket: TcpStream) {
 
 #[tokio::main]
 async fn main() {
+    let args: Vec<String> = env::args().collect();
+    let mut data_dir: Option<String> = None;
+
+    if args.len() > 1 {
+        println!("Received arguments: {:?}", args);
+        match &args[1][..] {
+            "--directory" => {
+                if args.len() > 2 {
+                    let path = &args[2];
+                    println!("Setting data dir to: {}", path);
+                    data_dir = Some(path.to_string())
+                }
+           },
+           _=> println!("Unknown argument: {}", &args[1]),
+        }
+    }
+
     let listener = TcpListener::bind("127.0.0.1:4221").await.unwrap();
 
     loop {
         let (socket, _) = listener.accept().await.unwrap();
+        let data_dir = data_dir.clone();
 
         tokio::spawn(async move {
-            handle_client(socket).await;
+            handle_client(socket, data_dir).await;
         });
     }
 }
