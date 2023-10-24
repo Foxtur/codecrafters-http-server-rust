@@ -20,20 +20,15 @@ impl HttpMethod {
             "POST" => Ok(HttpMethod::POST),
             _ => Err(Error::new(
                 std::io::ErrorKind::InvalidData,
-                "Invalid HTTP method",
+                "Unsupported HTTP method",
             )),
         }
     }
 }
 
-#[allow(dead_code)]
 struct HttpRequest<'a> {
-    host: &'a str,
-    port: u32,
     method: HttpMethod,
-    scheme: &'a str,
     path: &'a str,
-    http_version: String,
     headers: Vec<&'a str>,
     content: Vec<u8>,
 }
@@ -45,7 +40,6 @@ impl<'a> HttpRequest<'a> {
 
         let mut method: Option<HttpMethod> = None;
         let mut path: &str = "";
-        let mut http_version: &str = "";
         let mut headers: Vec<&str> = Vec::new();
         let mut content = Vec::new();
 
@@ -56,7 +50,6 @@ impl<'a> HttpRequest<'a> {
                 let method_str = parts[0];
                 method = Some(HttpMethod::parse_method(method_str)?);
                 path = parts[1];
-                http_version = parts[2];
             } else if line.is_empty() {
                 encountered_newlines += 1;
             } else if encountered_newlines == 1 {
@@ -67,12 +60,8 @@ impl<'a> HttpRequest<'a> {
         }
 
         Ok(HttpRequest {
-            host: "localhost",
-            port: 80,
             method: method.unwrap(),
-            scheme: "http",
             path,
-            http_version: http_version.to_string(),
             headers,
             content,
         })
@@ -126,6 +115,44 @@ impl<'a> HttpResponse<'a> {
             headers: None,
             content: None,
         }
+    }
+
+    fn to_byte_vector(&self) -> Vec<u8> {
+        let mut http_string: String = "".to_owned();
+
+        // http status line
+        http_string.push_str(
+            format!(
+                "{} {} {}\r\n",
+                self.http_version, self.status_code, self.reason
+            )
+            .as_str(),
+        );
+
+        // headers
+        if let Some(headers) = &self.headers {
+            for header in headers {
+                http_string.push_str(format!("{}\r\n", &header).as_str());
+            }
+        }
+
+        // content-lenght and newline
+        if let Some(content) = &self.content {
+            if content.is_empty() {
+                http_string.push_str("Content-Length: 0\r\n\r\n");
+            } else {
+                http_string.push_str(format!("Content-Length: {}\r\n\r\n", content.len()).as_str())
+            }
+        } else {
+            http_string.push_str("\r\n");
+        }
+
+        // body
+        let mut http_message = http_string.to_string().as_bytes().to_vec();
+        if let Some(content) = &self.content {
+            http_message.extend(content.clone());
+        }
+        http_message
     }
 }
 
@@ -191,44 +218,6 @@ fn handle_file_upload(request: HttpRequest, data_dir: String) -> HttpResponse {
     HttpResponse::created()
 }
 
-fn http_response_to_string(response: &HttpResponse) -> Vec<u8> {
-    let mut http_string: String = "".to_owned();
-
-    // http status line
-    http_string.push_str(
-        format!(
-            "{} {} {}\r\n",
-            response.http_version, response.status_code, response.reason
-        )
-        .as_str(),
-    );
-
-    // headers
-    if let Some(headers) = &response.headers {
-        for header in headers {
-            http_string.push_str(format!("{}\r\n", &header).as_str());
-        }
-    }
-
-    // content-lenght and newline
-    if let Some(content) = &response.content {
-        if content.is_empty() {
-            http_string.push_str("Content-Length: 0\r\n\r\n");
-        } else {
-            http_string.push_str(format!("Content-Length: {}\r\n\r\n", content.len()).as_str())
-        }
-    } else {
-        http_string.push_str("\r\n");
-    }
-
-    // body
-    let mut http_message = http_string.to_string().as_bytes().to_vec();
-    if let Some(content) = &response.content {
-        http_message.extend(content.clone());
-    }
-    http_message
-}
-
 fn handle_request(request: HttpRequest, data_dir: Option<String>) -> HttpResponse {
     match request.path {
         "/" => HttpResponse::ok(None, None),
@@ -265,12 +254,15 @@ async fn handle_client(mut socket: TcpStream, data_dir: Option<String>) {
                                 "Responding with {} {}",
                                 response.status_code, response.reason
                             );
-                            let response_str = http_response_to_string(&response);
-                            if socket.write_all(response_str.as_bytes()).await.is_err() {
-                                eprintln!("Failed writing to socket!");
+                            if socket
+                                .write_all(&response.to_byte_vector().as_bytes())
+                                .await
+                                .is_err()
+                            {
+                                eprintln!("ERROR: Failed writing to socket!");
                                 return;
                             }
-                        },
+                        }
                         Err(e) => {
                             eprintln!("ERROR: handle_client: {:?}", e);
                             return;
