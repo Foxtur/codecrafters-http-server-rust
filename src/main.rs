@@ -1,20 +1,29 @@
-use std::env;
-use std::fs::File;
-use std::io::{self, Read};
-use std::io::prelude::*;
 use io::Error;
 use nom::AsBytes;
-use tokio::net::{TcpListener, TcpStream};
+use std::env;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::{self, Read};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::{TcpListener, TcpStream};
 
-#[allow(dead_code)]
 #[derive(PartialEq)]
 enum HttpMethod {
     GET,
     POST,
-    PUT,
-    DELETE,
-    UPDATE,
+}
+
+impl HttpMethod {
+    fn parse_method(method_str: &str) -> std::io::Result<HttpMethod> {
+        match method_str {
+            "GET" => Ok(HttpMethod::GET),
+            "POST" => Ok(HttpMethod::POST),
+            _ => Err(Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Invalid HTTP method",
+            )),
+        }
+    }
 }
 
 #[allow(dead_code)]
@@ -26,105 +35,104 @@ struct HttpRequest<'a> {
     path: &'a str,
     http_version: String,
     headers: Vec<&'a str>,
-    content: Vec<u8>
+    content: Vec<u8>,
+}
+
+impl<'a> HttpRequest<'a> {
+    fn parse_request(data: &[u8]) -> std::io::Result<HttpRequest> {
+        let string_data = std::str::from_utf8(data).unwrap();
+        println!("Parsing Request - Received data:\n{}", string_data);
+
+        let mut method: Option<HttpMethod> = None;
+        let mut path: &str = "";
+        let mut http_version: &str = "";
+        let mut headers: Vec<&str> = Vec::new();
+        let mut content = Vec::new();
+
+        let mut encountered_newlines = 0;
+        for (line_num, line) in string_data.lines().enumerate() {
+            if line_num == 0 {
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                let method_str = parts[0];
+                method = Some(HttpMethod::parse_method(method_str)?);
+                path = parts[1];
+                http_version = parts[2];
+            } else if line.is_empty() {
+                encountered_newlines += 1;
+            } else if encountered_newlines == 1 {
+                content.extend(line.as_bytes())
+            } else {
+                headers.push(line);
+            }
+        }
+
+        Ok(HttpRequest {
+            host: "localhost",
+            port: 80,
+            method: method.unwrap(),
+            scheme: "http",
+            path,
+            http_version: http_version.to_string(),
+            headers,
+            content,
+        })
+    }
 }
 
 struct HttpResponse<'a> {
     http_version: &'a str,
     status_code: u16,
     reason: &'a str,
-    headers: Vec<&'a str>,
-    content: Vec<u8>
+    headers: Option<Vec<&'a str>>,
+    content: Option<Vec<u8>>,
 }
 
-fn parse_method(method_str: &str) -> Result<HttpMethod, Error> {
-    match method_str {
-        "GET" => Ok(HttpMethod::GET),
-        "POST" => Ok(HttpMethod::POST),
-        _ => Err(Error::new(std::io::ErrorKind::InvalidData, "Invalid HTTP method"))
-    }
-}
-
-fn parse_request(data: &[u8]) -> Result<HttpRequest, io::Error> {
-    let string_data = std::str::from_utf8(data).unwrap();
-    println!("Received data:\n{}", string_data);
-
-    let mut method: Option<HttpMethod> = Option::None;
-    let mut path: &str = "";
-    let mut http_version: &str = "";
-    let mut headers: Vec<&str> = Vec::new();
-    let mut content = Vec::new();
-
-    let mut encountered_newlines = 0;
-    for (line_num, line) in string_data.lines().enumerate() {
-        if line_num == 0 {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            let method_str = parts[0];
-            method = Some(parse_method(method_str)?);
-            path = parts[1];
-            http_version = parts[2];
-        } else if line.is_empty() {
-            encountered_newlines += 1;
-        } else if encountered_newlines == 1 {
-            content.extend(line.as_bytes())
-        } else {
-            headers.push(line);
+impl<'a> HttpResponse<'a> {
+    fn ok(headers: Option<Vec<&'a str>>, content: Option<Vec<u8>>) -> HttpResponse<'a> {
+        HttpResponse {
+            http_version: "HTTP/1.1",
+            status_code: 200,
+            reason: "OK",
+            headers,
+            content,
         }
     }
 
-    Ok(HttpRequest {
-        host: "localhost",
-        port: 80,
-        method: method.unwrap(),
-        scheme: "http",
-        path,
-        http_version: http_version.to_string(),
-        headers,
-        content
-    })
-}
-
-fn handle_ok() -> HttpResponse<'static> {
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 200,
-        reason: "OK",
-        headers: Vec::new(),
-        content: Vec::new()
+    fn created() -> HttpResponse<'a> {
+        HttpResponse {
+            http_version: "HTTP/1.1",
+            status_code: 201,
+            reason: "Created",
+            headers: None,
+            content: None,
+        }
     }
-}
 
-fn handle_internal_server_error() -> HttpResponse<'static> {
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 500,
-        reason: "Internal Server Error",
-        headers: Vec::new(),
-        content: Vec::new()
+    fn not_found() -> HttpResponse<'a> {
+        HttpResponse {
+            http_version: "HTTP/1.1",
+            status_code: 404,
+            reason: "NOT FOUND",
+            headers: None,
+            content: None,
+        }
     }
-}
 
-fn handle_not_found() -> HttpResponse<'static> {
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 404,
-        reason: "NOT FOUND",
-        headers: Vec::new(),
-        content: Vec::new()
+    fn internal_server_error() -> HttpResponse<'a> {
+        HttpResponse {
+            http_version: "HTTP/1.1",
+            status_code: 500,
+            reason: "Internal Server Error",
+            headers: None,
+            content: None,
+        }
     }
 }
 
 fn handle_echo(request: HttpRequest) -> HttpResponse {
     let echo_text = request.path.replace("/echo/", "");
     let headers = vec!["Content-Type: text/plain"];
-
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 200,
-        reason: "OK",
-        headers,
-        content: echo_text.as_bytes().to_vec(),
-    }
+    HttpResponse::ok(Some(headers), Some(echo_text.as_bytes().to_vec()))
 }
 
 fn handle_user_agent(request: HttpRequest) -> HttpResponse {
@@ -133,7 +141,8 @@ fn handle_user_agent(request: HttpRequest) -> HttpResponse {
         println!("Header: {}", header);
     }
 
-    let user_agent = &request.headers
+    let user_agent = &request
+        .headers
         .iter()
         .find(|&&header| header.starts_with("User-Agent"))
         .map(|&header| header.replace("User-Agent: ", ""))
@@ -141,13 +150,7 @@ fn handle_user_agent(request: HttpRequest) -> HttpResponse {
 
     let headers = vec!["Content-Type: text/plain"];
 
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 200,
-        reason: "OK",
-        headers,
-        content: user_agent.as_bytes().to_vec(),
-    }
+    HttpResponse::ok(Some(headers), Some(user_agent.as_bytes().to_vec()))
 }
 
 fn read_file(file_path: String) -> io::Result<Vec<u8>> {
@@ -163,17 +166,9 @@ fn handle_file(request: HttpRequest, data_dir: String) -> HttpResponse {
         Ok(file_content) => {
             println!("{:?}", std::str::from_utf8(&file_content).unwrap());
             let headers = vec!["Content-Type: application/octet-stream"];
-            HttpResponse {
-                http_version: "HTTP/1.1",
-                status_code: 200,
-                reason: "OK",
-                headers,
-                content: file_content
-            }
-        },
-        Err(_) => {
-            handle_not_found()
+            HttpResponse::ok(Some(headers), Some(file_content))
         }
+        Err(_) => HttpResponse::not_found(),
     }
 }
 
@@ -193,70 +188,66 @@ fn handle_file_upload(request: HttpRequest, data_dir: String) -> HttpResponse {
         Err(e) => println!("Error writing to file: {} - {:?}", file_path, e),
     }
 
-    HttpResponse {
-        http_version: "HTTP/1.1",
-        status_code: 201,
-        reason: "Created",
-        headers: Vec::new(),
-        content: Vec::new()
-    }
+    HttpResponse::created()
 }
 
 fn http_response_to_string(response: &HttpResponse) -> Vec<u8> {
     let mut http_string: String = "".to_owned();
 
     // http status line
-    http_string.push_str(format!("{} {} {}\r\n",
-                                 response.http_version,
-                                 response.status_code,
-                                 response.reason
-    ).as_str());
+    http_string.push_str(
+        format!(
+            "{} {} {}\r\n",
+            response.http_version, response.status_code, response.reason
+        )
+        .as_str(),
+    );
 
     // headers
-    for header in &response.headers {
-        http_string.push_str(format!("{}\r\n", &header).as_str());
+    if let Some(headers) = &response.headers {
+        for header in headers {
+            http_string.push_str(format!("{}\r\n", &header).as_str());
+        }
     }
 
     // content-lenght and newline
-    if response.content.is_empty() {
-        http_string.push_str("Content-Length: 0\r\n\r\n");
+    if let Some(content) = &response.content {
+        if content.is_empty() {
+            http_string.push_str("Content-Length: 0\r\n\r\n");
+        } else {
+            http_string.push_str(format!("Content-Length: {}\r\n\r\n", content.len()).as_str())
+        }
     } else {
-        http_string.push_str(
-            format!("Content-Length: {}\r\n\r\n", response.content.len()).as_str()
-        )
+        http_string.push_str("\r\n");
     }
-
 
     // body
     let mut http_message = http_string.to_string().as_bytes().to_vec();
-    http_message.extend(response.content.clone());
+    if let Some(content) = &response.content {
+        http_message.extend(content.clone());
+    }
     http_message
 }
 
 fn handle_request(request: HttpRequest, data_dir: Option<String>) -> HttpResponse {
     match request.path {
-        "/" => handle_ok(),
+        "/" => HttpResponse::ok(None, None),
         "/user-agent" => handle_user_agent(request),
-        _ if request.path.starts_with("/echo/") => {
-            handle_echo(request)
-        },
+        _ if request.path.starts_with("/echo/") => handle_echo(request),
         _ if request.path.starts_with("/files/") && request.method == HttpMethod::GET => {
             match data_dir {
-               Some(dir) => {
-                   handle_file(request, dir)
-               },
-               _ => handle_internal_server_error()
+                Some(dir) => handle_file(request, dir),
+                _ => HttpResponse::internal_server_error(),
             }
-        },
+        }
         _ if request.path.starts_with("/files/") && request.method == HttpMethod::POST => {
             match data_dir {
                 Some(dir) => handle_file_upload(request, dir),
-               _ => handle_internal_server_error()
+                _ => HttpResponse::internal_server_error(),
             }
-        },
-        _ => handle_not_found(),
+        }
+        _ => HttpResponse::not_found(),
     }
-
 }
 
 async fn handle_client(mut socket: TcpStream, data_dir: Option<String>) {
@@ -267,31 +258,29 @@ async fn handle_client(mut socket: TcpStream, data_dir: Option<String>) {
             match socket.read(&mut buffer).await {
                 Ok(0) => return,
                 Ok(n) => {
-                    println!("Read {} bytes", n);
-                    match parse_request(&buffer[..n]) {
+                    match HttpRequest::parse_request(&buffer[..n]) {
                         Ok(request) => {
                             let response = handle_request(request, data_dir);
                             println!(
                                 "Responding with {} {}",
-                                response.status_code,
-                                response.reason
+                                response.status_code, response.reason
                             );
                             let response_str = http_response_to_string(&response);
                             if socket.write_all(response_str.as_bytes()).await.is_err() {
                                 eprintln!("Failed writing to socket!");
                                 return;
                             }
-                        }
+                        },
                         Err(e) => {
-                            println!("ERROR: handle_client: {:?}", e);
-                            return
+                            eprintln!("ERROR: handle_client: {:?}", e);
+                            return;
                         }
                     }
                     // close connection
-                    return
-                },
+                    return;
+                }
                 Err(e) => {
-                    println!("ERROR: handle_client: {:?}", e);
+                    eprintln!("ERROR: handle_client: {:?}", e);
                     return;
                 }
             }
@@ -313,8 +302,8 @@ async fn main() {
                     println!("Setting data dir to: {}", path);
                     data_dir = Some(path.to_string())
                 }
-           },
-           _=> println!("Unknown argument: {}", &args[1]),
+            }
+            _ => println!("Unknown argument: {}", &args[1]),
         }
     }
 
